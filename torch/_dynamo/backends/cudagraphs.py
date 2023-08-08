@@ -47,6 +47,7 @@ class CudaGraphModule(Module):
         # the cuda graph, then copies out.  First condition is the hotpath,
         # needs optimizing
         if self.graph is not None:
+            # 第三次及以后的调用会直接调用 graph
             assert len(args) == len(self.static_inputs)
             for dst, src in zip(self.static_inputs, args):
                 dst.copy_(src)
@@ -56,6 +57,7 @@ class CudaGraphModule(Module):
             return tree_map(cloner, self.static_outputs)
 
         elif self.warmed_up:
+            # 第二次调用会触发 graph 生成
             # record
             self.static_inputs = [x.clone() for x in args]
             self.graph = torch.cuda.CUDAGraph()
@@ -69,6 +71,7 @@ class CudaGraphModule(Module):
             return tree_map(cloner, self.static_outputs)
 
         else:
+            # 第一次被调用会触发 warmup 操作
             # warmup
             stream = torch.cuda.Stream()
             stream.wait_stream(torch.cuda.current_stream())
@@ -127,12 +130,16 @@ def apply_cuda_graphs(gm):
             submod = gm.get_submodule(n.target)
             gm.delete_submodule(n.target)
             mutated_inputs = find_input_mutations(submod.graph)
+            # 把 module 替换成了 CudaGraphModule
             gm.add_submodule(n.target, CudaGraphModule(submod, mutated_inputs))
     # NB: we didn't actually change the graph, no need for recompile
 
 
 def cudagraphs(model, inputs):
+    # Partition an FX graph into sub-GraphModules that can be validly run under CUDA graphs.
+    # 输出还是 FX graph，不过看起来是一个 GraphModule 可以对应一个 CUDA graph 了
     model = partition_cudagraphs(model, inputs)
+    # 把每个 Module 包装成一个 CudaGraphModule
     apply_cuda_graphs(model)
     return model
 

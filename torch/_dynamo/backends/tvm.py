@@ -19,6 +19,7 @@ def tvm(gm, example_inputs, *, scheduler=None, trials=20000):
     from tvm import relay  # type: ignore[import]
     from tvm.contrib import graph_executor  # type: ignore[import]
 
+    # 使用 torch.jit.trace 来静态化 torch module
     jit_mod = torch.jit.trace(gm, example_inputs)
     device = device_from_inputs(example_inputs)
     shape_list = [(f"inp_{idx}", i.shape) for idx, i in enumerate(example_inputs)]
@@ -26,6 +27,10 @@ def tvm(gm, example_inputs, *, scheduler=None, trials=20000):
     if len(example_outputs) == 0:
         log.warning("Explicitly fall back to eager due to zero output")
         return gm.forward
+    
+    # 利用 tvm relay 来加载 scripted PyTorch model
+    # 返回的 mod 是 tvm.IRModule， params 是参数数据
+    # 参见：https://tvm.apache.org/docs/reference/api/python/relay/frontend.html#tvm.relay.frontend.from_pytorch
     mod, params = relay.frontend.from_pytorch(jit_mod, shape_list)
     if device.type == "cuda":
         dev = tvm.cuda(device.index)
@@ -101,14 +106,19 @@ def tvm(gm, example_inputs, *, scheduler=None, trials=20000):
     elif scheduler == "default" or not scheduler:
         # no autotuning
         with tvm.transform.PassContext(opt_level=10):
+            # build 成 Relay 函数
+            # 参见：https://tvm.apache.org/docs/reference/api/python/relay/index.html#:~:text=meta%20data%20section.-,tvm.relay.build(,-ir_mod%2C%20target
             lib = relay.build(mod, target=target, params=params)
     else:
         raise NotImplementedError(
             "This tuning option is invalid/not implemented for torchdynamo's TVM-related backend. "
             "There are three available options: default, auto_scheduler and meta_schedule."
         )
+    # 把 Relay 函数包装成 graph_executor.GraphModule
+    # 参见：https://tvm.apache.org/docs/reference/api/python/graph_executor.html#tvm.contrib.graph_executor.GraphModule
     m = graph_executor.GraphModule(lib["default"](dev))
 
+    # tvm NDArray 到 torch tensor 
     def to_torch_tensor(nd_tensor):
         """A helper function to transfer a NDArray to torch.tensor."""
         if nd_tensor.dtype == "bool":
@@ -118,6 +128,7 @@ def tvm(gm, example_inputs, *, scheduler=None, trials=20000):
             return torch.from_numpy(nd_tensor.numpy())
         return torch.utils.dlpack.from_dlpack(nd_tensor.to_dlpack())
 
+    # torch tensor 到 tvm NDArray
     def to_tvm_tensor(torch_tensor):
         """A helper function to transfer a torch.tensor to NDArray."""
         if torch_tensor.dtype == torch.bool:
@@ -126,6 +137,7 @@ def tvm(gm, example_inputs, *, scheduler=None, trials=20000):
             return tvm.nd.array(torch_tensor.cpu().numpy())
         return tvm.nd.from_dlpack(torch_tensor)
 
+    # 生成一个执行函数，函数内调用 tvm GraphModule 执行推理
     def exec_tvm(*i_args):
         args = [a.contiguous() for a in i_args]
         shape_info, _ = m.get_input_info()
