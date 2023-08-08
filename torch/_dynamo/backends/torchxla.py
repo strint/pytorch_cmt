@@ -21,6 +21,7 @@ def torchxla_trace_once(model, fake_tensor_inputs):
         nonlocal model
         nonlocal compiled_graph
         if compiled_graph is None:
+            # 参见：https://github.com/pytorch/xla/blob/6852df1d45971ffa553f99c1eedf66154f04156e/torch_xla/core/dynamo_bridge.py#L390
             compiled_graph = bridge.extract_compiled_graph(model, args)
             del model
         return compiled_graph(*args)
